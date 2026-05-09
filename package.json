@@ -1,0 +1,24 @@
+{
+  "name": "@sentrodb/connector-helper-sql",
+  "version": "1.0.1",
+  "description": "SentroDB Connector Helper for SQL using Node",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "author": "Ahmad Alyousef <ahmad-alyousef@hotmail.com>",
+  "license": "ISC",
+  "dependencies": {
+    "kysely": "^0.28.2",
+    "mysql2": "^3.14.1",
+    "pg": "^8.16.0",
+    "tarn": "^3.0.2",
+    "tedious": "^18.6.1",
+    "typescript": "^5.8.3",
+    "@sentrodb/connector-node-types": "^1.0.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.2"
+  }
+}
