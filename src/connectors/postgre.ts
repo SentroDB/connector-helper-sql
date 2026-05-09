@@ -5,7 +5,10 @@ import { Pool as PostgresPool } from "pg";
 export default function PostgresConnector<T>(config: DBManagerTypes.DBConfig) {
     return new Kysely<T>({
         dialect: new PostgresDialect({
-            pool: new PostgresPool(config)
+            pool: new PostgresPool({
+                ...config,
+                ssl: { rejectUnauthorized: false },
+            }),
         })
     });
 }

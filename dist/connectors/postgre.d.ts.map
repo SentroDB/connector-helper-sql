@@ -1,1 +1,1 @@
-{"version":3,"file":"postgre.d.ts","sourceRoot":"","sources":["../../src/connectors/postgre.ts"],"names":[],"mappings":"AAAA,OAAO,cAAc,MAAM,gCAAgC,CAAC;AAC5D,OAAO,EAAE,MAAM,EAAmB,MAAM,QAAQ,CAAC;AAGjD,MAAM,CAAC,OAAO,UAAU,iBAAiB,CAAC,CAAC,EAAE,MAAM,EAAE,cAAc,CAAC,QAAQ,aAM3E"}
+{"version":3,"file":"postgre.d.ts","sourceRoot":"","sources":["../../src/connectors/postgre.ts"],"names":[],"mappings":"AAAA,OAAO,cAAc,MAAM,gCAAgC,CAAC;AAC5D,OAAO,EAAE,MAAM,EAAmB,MAAM,QAAQ,CAAC;AAGjD,MAAM,CAAC,OAAO,UAAU,iBAAiB,CAAC,CAAC,EAAE,MAAM,EAAE,cAAc,CAAC,QAAQ,aAS3E"}
