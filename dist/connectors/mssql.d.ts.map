@@ -1,0 +1,1 @@
+{"version":3,"file":"mssql.d.ts","sourceRoot":"","sources":["../../src/connectors/mssql.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,MAAM,EAAgB,MAAM,QAAQ,CAAC;AAG9C,OAAO,cAAc,MAAM,gCAAgC,CAAC;AAE5D,MAAM,CAAC,OAAO,UAAU,cAAc,CAAC,CAAC,EAAE,MAAM,EAAE,cAAc,CAAC,QAAQ,mBA8BxE"}
