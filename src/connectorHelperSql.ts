@@ -6,6 +6,19 @@ import MssqlConnector from "./connectors/mssql";
 import { DbParser } from "./utils/db.parser";
 import DBManagerTypes, { SegmentCondition } from "@sentrodb/connector-node-types";
 
+export type JunctionWriteSpec = {
+    /** Hidden junction table (e.g. "_DocumentToTag") */
+    junctionTable: string;
+    /** Junction column holding the parent's PK value (e.g. "A") */
+    sourceColumn: string;
+    /** Junction column holding the related target's PK value (e.g. "B") */
+    targetColumn: string;
+    /** Column on the parent table whose value goes into junction.sourceColumn (e.g. "id") */
+    parentSourceColumn: string;
+    /** Target ids to link to the parent for this relation */
+    targetIds: any[];
+};
+
 /**
  * Apply a list of segment-style structured conditions to a Kysely query.
  * Conditions are AND-merged. Unknown operators are ignored.
@@ -164,22 +177,126 @@ export default class ConnectorHelperSql {
     }
 
     public async update(
-        { table, data, where }: {
+        { table, data, where, junctions }: {
             table: string,
             data: DBManagerSchema.UpdateBy<DBManagerSchema.TableName>["patch"],
-            where: DBManagerSchema.UpdateBy<DBManagerSchema.TableName>["where"]
+            where: DBManagerSchema.UpdateBy<DBManagerSchema.TableName>["where"],
+            junctions?: JunctionWriteSpec[],
         }
     ) {
         if (!this.dbHandler) return;
-        const query = this.dbHandler.updateTable(table).set(data);
-        if (where) query.where((eb) => eb.and(where));
-        return query.execute();
+
+        if (!junctions?.length) {
+            const query = this.dbHandler.updateTable(table).set(data);
+            if (where) query.where((eb) => eb.and(where));
+            return query.execute();
+        }
+
+        return this.dbHandler.transaction().execute(async (trx) => {
+            let q = trx.updateTable(table).set(data);
+            if (where) q = q.where((eb) => eb.and(where));
+            const result = await q.execute();
+
+            const sourceValues = await this.collectSourceValues(trx, table, where, junctions);
+            for (const j of junctions) {
+                if (!sourceValues.length) continue;
+                await trx
+                    .deleteFrom(j.junctionTable)
+                    .where(j.sourceColumn, "in", sourceValues as any)
+                    .execute();
+                const rows: Record<string, any>[] = [];
+                for (const sv of sourceValues) {
+                    for (const tid of j.targetIds) {
+                        rows.push({ [j.sourceColumn]: sv, [j.targetColumn]: tid });
+                    }
+                }
+                if (rows.length) {
+                    await trx.insertInto(j.junctionTable).values(rows).execute();
+                }
+            }
+
+            return result;
+        });
     }
 
-    public async insert({ table, data }: { table: string, data: any }) {
+    public async insert({ table, data, junctions }: {
+        table: string,
+        data: any,
+        junctions?: JunctionWriteSpec[],
+    }) {
         if (!this.dbHandler) return;
-        const query = this.dbHandler.insertInto(table).values(data);
-        return query.execute();
+
+        if (!junctions?.length) {
+            return this.dbHandler.insertInto(table).values(data).execute();
+        }
+
+        return this.dbHandler.transaction().execute(async (trx) => {
+            const inserted = await trx
+                .insertInto(table)
+                .values(data)
+                .returningAll()
+                .execute();
+
+            for (const j of junctions) {
+                const rows: Record<string, any>[] = [];
+                for (const parent of inserted) {
+                    const sourceValue = (parent as any)[j.parentSourceColumn];
+                    if (sourceValue == null) continue;
+                    for (const tid of j.targetIds) {
+                        rows.push({ [j.sourceColumn]: sourceValue, [j.targetColumn]: tid });
+                    }
+                }
+                if (rows.length) {
+                    await trx.insertInto(j.junctionTable).values(rows).execute();
+                }
+            }
+
+            return inserted;
+        });
+    }
+
+    /**
+     * Read target ids from a junction table for a given source row. Used by
+     * the connector to populate M2M multi-selects with current selections.
+     */
+    public async getRelatedIds({
+        junctionTable,
+        sourceColumn,
+        sourceValue,
+        targetColumn,
+    }: {
+        junctionTable: string;
+        sourceColumn: string;
+        sourceValue: any;
+        targetColumn: string;
+    }): Promise<any[]> {
+        if (!this.dbHandler) return [];
+        const rows = await this.dbHandler
+            .selectFrom(junctionTable)
+            .select(targetColumn)
+            .where(sourceColumn, "=", sourceValue)
+            .execute();
+        return rows.map((r: any) => r[targetColumn]);
+    }
+
+    private async collectSourceValues(
+        trx: Kysely<any>,
+        table: string,
+        where: DBManagerSchema.UpdateBy<DBManagerSchema.TableName>["where"],
+        junctions: JunctionWriteSpec[],
+    ): Promise<any[]> {
+        const cols = Array.from(new Set(junctions.map((j) => j.parentSourceColumn)));
+        if (!cols.length) return [];
+        let q = trx.selectFrom(table).select(cols as any);
+        if (where) q = q.where((eb: any) => eb.and(where));
+        const rows = await q.execute();
+        // Single source column case (the common one) — flatten to array of values.
+        if (cols.length === 1) {
+            return rows.map((r: any) => r[cols[0]]).filter((v) => v != null);
+        }
+        // Multi-source case shouldn't happen with Prisma implicit M2M (always PK),
+        // but be safe: only return if all junctions share the same source column.
+        return rows.map((r: any) => r[cols[0]]).filter((v) => v != null);
     }
 
     public async delete({ table, where, single }: { table: string, where: any, single: boolean }) {

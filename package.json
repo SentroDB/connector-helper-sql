@@ -16,7 +16,7 @@
     "tarn": "^3.0.2",
     "tedious": "^18.6.1",
     "typescript": "^5.8.3",
-    "@sentrodb/connector-node-types": "^1.0.1"
+    "@sentrodb/connector-node-types": "file:../connector-node-types"
   },
   "devDependencies": {
     "@types/pg": "^8.15.2"

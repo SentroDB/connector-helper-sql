@@ -1,4 +1,16 @@
 import DBManagerTypes, { SegmentCondition } from "@sentrodb/connector-node-types";
+export type JunctionWriteSpec = {
+    /** Hidden junction table (e.g. "_DocumentToTag") */
+    junctionTable: string;
+    /** Junction column holding the parent's PK value (e.g. "A") */
+    sourceColumn: string;
+    /** Junction column holding the related target's PK value (e.g. "B") */
+    targetColumn: string;
+    /** Column on the parent table whose value goes into junction.sourceColumn (e.g. "id") */
+    parentSourceColumn: string;
+    /** Target ids to link to the parent for this relation */
+    targetIds: any[];
+};
 export default class ConnectorHelperSql {
     private dbHandler;
     private dbConfig;
@@ -29,15 +41,30 @@ export default class ConnectorHelperSql {
     }): Promise<{
         [x: string]: any;
     } | undefined>;
-    update({ table, data, where }: {
+    update({ table, data, where, junctions }: {
         table: string;
         data: DBManagerSchema.UpdateBy<DBManagerSchema.TableName>["patch"];
         where: DBManagerSchema.UpdateBy<DBManagerSchema.TableName>["where"];
+        junctions?: JunctionWriteSpec[];
     }): Promise<import("kysely").UpdateResult[] | undefined>;
-    insert({ table, data }: {
+    insert({ table, data, junctions }: {
         table: string;
         data: any;
-    }): Promise<import("kysely").InsertResult[] | undefined>;
+        junctions?: JunctionWriteSpec[];
+    }): Promise<{
+        [x: string]: any;
+    }[] | import("kysely").InsertResult[] | undefined>;
+    /**
+     * Read target ids from a junction table for a given source row. Used by
+     * the connector to populate M2M multi-selects with current selections.
+     */
+    getRelatedIds({ junctionTable, sourceColumn, sourceValue, targetColumn, }: {
+        junctionTable: string;
+        sourceColumn: string;
+        sourceValue: any;
+        targetColumn: string;
+    }): Promise<any[]>;
+    private collectSourceValues;
     delete({ table, where, single }: {
         table: string;
         where: any;

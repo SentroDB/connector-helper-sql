@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@sentrodb/connector-node-types':
-        specifier: ^1.0.1
-        version: 1.0.1
+        specifier: file:../connector-node-types
+        version: file:../connector-node-types
       kysely:
         specifier: ^0.28.2
         version: 0.28.2
@@ -103,8 +103,8 @@ packages:
   '@js-joda/core@5.6.5':
     resolution: {integrity: sha512-3zwefSMwHpu8iVUW8YYz227sIv6UFqO31p1Bf1ZH/Vom7CmNyUsXjDBlnNzcuhmOL1XfxZ3nvND42kR23XlbcQ==}
 
-  '@sentrodb/connector-node-types@1.0.1':
-    resolution: {integrity: sha512-9hYrtUaAGXNGlpCzSkoRsRv+ym6SL3tbrCQVkchsLPOMW4RMs7ILRUFh64H3BaGk8sZMhSV3WysXXhj9uyf6vQ==}
+  '@sentrodb/connector-node-types@file:../connector-node-types':
+    resolution: {directory: ../connector-node-types, type: directory}
 
   '@types/node@22.15.21':
     resolution: {integrity: sha512-EV/37Td6c+MgKAbkcLG6vqZ2zEYHD7bvSrzqqs2RIhbA6w3x+Dqz8MZM3sP6kGTeLrdoOgKZe+Xja7tUB2DNkQ==}
@@ -573,7 +573,7 @@ snapshots:
 
   '@js-joda/core@5.6.5': {}
 
-  '@sentrodb/connector-node-types@1.0.1': {}
+  '@sentrodb/connector-node-types@file:../connector-node-types': {}
 
   '@types/node@22.15.21':
     dependencies:

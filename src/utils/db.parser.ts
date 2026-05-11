@@ -13,11 +13,17 @@ export class DbParser {
     async getSchemaDetails(): Promise<{
         tables: DBManagerTypes.Table[];
     }> {
-        const [tables, constraints, indexes] = await Promise.all([
+        const [rawTables, rawConstraints, rawIndexes] = await Promise.all([
             this.getTables(),
             this.getConstraints(),
             this.getIndexes(),
         ]);
+
+        const { tables, constraints, indexes } = this.foldPrismaImplicitM2M(
+            rawTables,
+            rawConstraints,
+            rawIndexes,
+        );
 
         constraints.forEach((constraint) => {
             const table = tables.find((t) => t.name === constraint.table);
@@ -38,63 +44,240 @@ export class DbParser {
         };
     }
 
+    /**
+     * Prisma's implicit many-to-many relations create junction tables named
+     * `_ModelAToModelB` (or `_RelationName` for named relations) with exactly
+     * two FK columns named `A` and `B`. They aren't user-facing entities, so
+     * we drop them and surface the relation as a virtual array-valued column
+     * on each side of the relationship. Synthetic constraints are kept (now
+     * pointing at the synthetic column) so ERD/relationships consumers still
+     * see the M2M edge.
+     */
+    private foldPrismaImplicitM2M(
+        tables: DBManagerTypes.Table[],
+        constraints: DBManagerTypes.Constraint[],
+        indexes: DBManagerTypes.Index[],
+    ): {
+        tables: DBManagerTypes.Table[];
+        constraints: DBManagerTypes.Constraint[];
+        indexes: DBManagerTypes.Index[];
+    } {
+        const junctionNames = new Set<string>();
+        const syntheticConstraints: DBManagerTypes.Constraint[] = [];
+
+        for (const table of tables) {
+            if (!table.name.startsWith("_")) continue;
+            if (table.columns.length !== 2) continue;
+
+            const colA = table.columns.find((c) => c.name === "A");
+            const colB = table.columns.find((c) => c.name === "B");
+            if (!colA?.foreign_key || !colB?.foreign_key) continue;
+
+            const fkA = constraints.find((c) => c.table === table.name && c.column === "A");
+            const fkB = constraints.find((c) => c.table === table.name && c.column === "B");
+            if (!fkA?.reference || !fkB?.reference) continue;
+
+            junctionNames.add(table.name);
+
+            const relationLabel = table.name.slice(1);
+            const sideA = tables.find((t) => t.name === fkA.reference!.table);
+            const sideB = tables.find((t) => t.name === fkB.reference!.table);
+            if (!sideA || !sideB) continue;
+
+            const aType = sideA.columns.find((c) => c.name === fkA.reference!.column)?.type ?? "text";
+            const bType = sideB.columns.find((c) => c.name === fkB.reference!.column)?.type ?? "text";
+
+            const aColName = this.pickM2MColumnName(sideA, fkB.reference.table, relationLabel);
+            const bColName = this.pickM2MColumnName(sideB, fkA.reference.table, relationLabel);
+
+            sideA.columns.push(this.buildM2MSyntheticColumn({
+                name: aColName,
+                elementType: bType,
+                references: { table: fkB.reference.table, column: fkB.reference.column },
+                junction: { table: table.name, sourceColumn: "A", targetColumn: "B" },
+            }));
+            sideB.columns.push(this.buildM2MSyntheticColumn({
+                name: bColName,
+                elementType: aType,
+                references: { table: fkA.reference.table, column: fkA.reference.column },
+                junction: { table: table.name, sourceColumn: "B", targetColumn: "A" },
+            }));
+
+            syntheticConstraints.push({
+                table: fkA.reference.table,
+                name: `${relationLabel}__a_to_b`,
+                column: aColName,
+                reference: { table: fkB.reference.table, column: fkB.reference.column },
+                onUpdate: fkA.onUpdate,
+                onDelete: fkA.onDelete,
+                relationshipType: "many-to-many",
+                isUnique: false,
+                junction: { table: table.name, sourceColumn: "A", targetColumn: "B" },
+            });
+            syntheticConstraints.push({
+                table: fkB.reference.table,
+                name: `${relationLabel}__b_to_a`,
+                column: bColName,
+                reference: { table: fkA.reference.table, column: fkA.reference.column },
+                onUpdate: fkB.onUpdate,
+                onDelete: fkB.onDelete,
+                relationshipType: "many-to-many",
+                isUnique: false,
+                junction: { table: table.name, sourceColumn: "B", targetColumn: "A" },
+            });
+        }
+
+        if (junctionNames.size === 0) {
+            return { tables, constraints, indexes };
+        }
+
+        return {
+            tables: tables.filter((t) => !junctionNames.has(t.name)),
+            constraints: [
+                ...constraints.filter((c) => !junctionNames.has(c.table)),
+                ...syntheticConstraints,
+            ],
+            indexes: indexes.filter((i) => !junctionNames.has(i.table)),
+        };
+    }
+
+    private pickM2MColumnName(
+        ownerTable: DBManagerTypes.Table,
+        targetTableName: string,
+        relationLabel: string,
+    ): string {
+        const taken = new Set(ownerTable.columns.map((c) => c.name));
+        const base = this.pluralizeLowercase(targetTableName);
+        if (!taken.has(base)) return base;
+        const withLabel = `${base}_${relationLabel}`;
+        if (!taken.has(withLabel)) return withLabel;
+        // Last-resort numeric suffix
+        let i = 2;
+        while (taken.has(`${base}_${i}`)) i++;
+        return `${base}_${i}`;
+    }
+
+    private pluralizeLowercase(name: string): string {
+        const lower = name.charAt(0).toLowerCase() + name.slice(1);
+        if (/(s|sh|ch|x|z)$/i.test(lower)) return lower + "es";
+        if (/[^aeiou]y$/i.test(lower)) return lower.slice(0, -1) + "ies";
+        return lower + "s";
+    }
+
+    private buildM2MSyntheticColumn({
+        name,
+        elementType,
+        references,
+        junction,
+    }: {
+        name: string;
+        elementType: string;
+        references: { table: string; column: string };
+        junction: { table: string; sourceColumn: string; targetColumn: string };
+    }): DBManagerTypes.Column {
+        return {
+            name,
+            type: `${elementType}[]`,
+            nullable: true,
+            default: null,
+            primary_key: false,
+            foreign_key: false,
+            unique: false,
+            autoincrement: false,
+            isGenerated: false,
+            generatedType: "none",
+            enum_values: [],
+            isMany: true,
+            references,
+            junction,
+            customization: {
+                description: "",
+                rename: "",
+                hideView: true,
+                hideEdit: false,
+                hideCreate: false,
+                readOnly: false,
+                position: 0,
+                displayType: "",
+                editType: "",
+                displayPrefix: "",
+                displaySuffix: "",
+            },
+        };
+    }
+
     async getTables(): Promise<DBManagerTypes.Table[]> {
         const columns = await sql<any>`
-           SELECT 
-            c.table_name,
-            c.column_name AS name,
-            c.data_type   AS type,
-            c.udt_name,
-            c.is_nullable = 'YES' AS nullable,
-            c.column_default AS "default",
-            CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN True ELSE False END AS primary_key,
-            CASE 
-                WHEN EXISTS (
-                    SELECT 1 
-                    FROM information_schema.table_constraints tc2
-                    JOIN information_schema.key_column_usage kcu2 
-                    ON tc2.constraint_name = kcu2.constraint_name
-                    WHERE tc2.constraint_type = 'FOREIGN KEY' 
-                    AND kcu2.table_name = c.table_name
-                    AND kcu2.column_name = c.column_name
-                ) THEN True ELSE False END AS foreign_key,
-            CASE WHEN tc.constraint_type = 'UNIQUE' THEN True ELSE False END AS "unique",
-            'N/A' AS "check",
-            CASE 
-                WHEN c.column_default LIKE 'nextval%' THEN True 
-                ELSE False 
-            END AS autoincrement,
-            CASE 
-                WHEN c.column_default LIKE 'nextval%' THEN 'sequence'
-                WHEN c.column_default LIKE '%cuid%'   THEN 'cuid'
-                WHEN c.column_default LIKE '%uuid%'   THEN 'uuid'
-                ELSE 'none'
-            END AS generated_type,
-            enum_info.enum_values,
-            CASE
-                WHEN c.column_name IN ('updatedAt', 'updated_at', 'createdAt', 'created_at')
-                AND c.data_type LIKE 'timestamp%'
-                THEN TRUE
-                ELSE FALSE
-            END AS is_updated_at
-        FROM information_schema.columns c
-        LEFT JOIN information_schema.key_column_usage kcu 
-        ON c.column_name = kcu.column_name 
-        AND c.table_name  = kcu.table_name
-        LEFT JOIN information_schema.table_constraints tc 
-        ON kcu.constraint_name = tc.constraint_name
-        LEFT JOIN LATERAL (
-        SELECT array_agg(e.enumlabel ORDER BY e.enumsortorder) AS enum_values
-        FROM pg_type t
-        JOIN pg_namespace n ON n.oid = t.typnamespace
-        JOIN pg_enum e ON e.enumtypid = t.oid
-        WHERE n.nspname = c.table_schema
-            AND t.typtype = 'e'
-            AND t.typname = c.udt_name
-        ) AS enum_info ON TRUE
-        WHERE c.table_schema = 'public'
-        ORDER BY c.table_name, c.ordinal_position;
-
+            SELECT
+                c.table_name,
+                c.column_name AS name,
+                c.data_type   AS type,
+                c.udt_name,
+                c.is_nullable = 'YES' AS nullable,
+                c.column_default AS "default",
+                EXISTS (
+                    SELECT 1
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON tc.constraint_name = kcu.constraint_name
+                     AND tc.constraint_schema = kcu.constraint_schema
+                    WHERE tc.constraint_type = 'PRIMARY KEY'
+                      AND kcu.table_schema = c.table_schema
+                      AND kcu.table_name   = c.table_name
+                      AND kcu.column_name  = c.column_name
+                ) AS primary_key,
+                EXISTS (
+                    SELECT 1
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON tc.constraint_name = kcu.constraint_name
+                     AND tc.constraint_schema = kcu.constraint_schema
+                    WHERE tc.constraint_type = 'FOREIGN KEY'
+                      AND kcu.table_schema = c.table_schema
+                      AND kcu.table_name   = c.table_name
+                      AND kcu.column_name  = c.column_name
+                ) AS foreign_key,
+                EXISTS (
+                    SELECT 1
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON tc.constraint_name = kcu.constraint_name
+                     AND tc.constraint_schema = kcu.constraint_schema
+                    WHERE tc.constraint_type = 'UNIQUE'
+                      AND kcu.table_schema = c.table_schema
+                      AND kcu.table_name   = c.table_name
+                      AND kcu.column_name  = c.column_name
+                ) AS "unique",
+                'N/A' AS "check",
+                CASE
+                    WHEN c.column_default LIKE 'nextval%' THEN True
+                    ELSE False
+                END AS autoincrement,
+                CASE
+                    WHEN c.column_default LIKE 'nextval%' THEN 'sequence'
+                    WHEN c.column_default LIKE '%cuid%'   THEN 'cuid'
+                    WHEN c.column_default LIKE '%uuid%'   THEN 'uuid'
+                    ELSE 'none'
+                END AS generated_type,
+                enum_info.enum_values,
+                CASE
+                    WHEN c.column_name IN ('updatedAt', 'updated_at', 'createdAt', 'created_at')
+                    AND c.data_type LIKE 'timestamp%'
+                    THEN TRUE
+                    ELSE FALSE
+                END AS is_updated_at
+            FROM information_schema.columns c
+            LEFT JOIN LATERAL (
+                SELECT array_agg(e.enumlabel ORDER BY e.enumsortorder) AS enum_values
+                FROM pg_type t
+                JOIN pg_namespace n ON n.oid = t.typnamespace
+                JOIN pg_enum e ON e.enumtypid = t.oid
+                WHERE n.nspname = c.table_schema
+                  AND t.typtype = 'e'
+                  AND t.typname = c.udt_name
+            ) AS enum_info ON TRUE
+            WHERE c.table_schema = 'public'
+            ORDER BY c.table_name, c.ordinal_position;
         `.execute(this.client);
 
         const tables: DBManagerTypes.Table[] = [];
