@@ -1,6 +1,6 @@
 {
   "name": "@sentrodb/connector-helper-sql",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "SentroDB Connector Helper for SQL using Node",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
