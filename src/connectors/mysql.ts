@@ -5,7 +5,10 @@ import { createPool } from "mysql2";
 export default function MysqlConnector<T>(config: DBManagerTypes.DBConfig) {
     return new Kysely<T>({
         dialect: new MysqlDialect({
-            pool: createPool(config)
+            pool: createPool({
+                ...config,
+                ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
+            })
         })
     });
 }

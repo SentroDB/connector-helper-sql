@@ -7,7 +7,7 @@ export default function PostgresConnector<T>(config: DBManagerTypes.DBConfig) {
         dialect: new PostgresDialect({
             pool: new PostgresPool({
                 ...config,
-                ssl: { rejectUnauthorized: false },
+                ssl: config.ssl ? { rejectUnauthorized: false } : false,
             }),
         })
     });
