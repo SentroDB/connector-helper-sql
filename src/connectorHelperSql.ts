@@ -4,6 +4,8 @@ import MysqlConnector from "./connectors/mysql";
 import PostgresConnector from "./connectors/postgre";
 import MssqlConnector from "./connectors/mssql";
 import { DbParser } from "./utils/db.parser";
+import { MysqlDbParser } from "./utils/db.parser.mysql";
+import { MssqlDbParser } from "./utils/db.parser.mssql";
 import DBManagerTypes, { SegmentCondition } from "@sentrodb/connector-node-types";
 
 export type JunctionWriteSpec = {
@@ -19,6 +21,28 @@ export type JunctionWriteSpec = {
     targetIds: any[];
 };
 
+type SqlDialect = DBManagerTypes.DBConfig["type"];
+
+/** Cast a column reference to a string type for text search, per dialect. */
+function castToText(ref: any, dialect: SqlDialect) {
+    if (dialect === "mysql") return sql`CAST(${ref} AS CHAR)`;
+    if (dialect === "mssql") return sql`CAST(${ref} AS NVARCHAR(MAX))`;
+    return sql`${ref}::text`;
+}
+
+/**
+ * Case-insensitive LIKE that works across dialects. Postgres and MySQL
+ * default the LIKE escape character to backslash; MSSQL has no default
+ * escape character, so it needs an explicit ESCAPE clause.
+ */
+function caseInsensitiveLike(ref: any, pattern: string, dialect: SqlDialect) {
+    const target = castToText(ref, dialect);
+    if (dialect === "mssql") {
+        return sql`LOWER(${target}) LIKE LOWER(${pattern}) ESCAPE '\\'`;
+    }
+    return sql`LOWER(${target}) LIKE LOWER(${pattern})`;
+}
+
 /**
  * Apply a list of segment-style structured conditions to a Kysely query.
  * Conditions are AND-merged. Unknown operators are ignored.
@@ -26,6 +50,7 @@ export type JunctionWriteSpec = {
 function applySegmentConditions<Q extends { where: any }>(
     query: Q,
     conditions: SegmentCondition[] | undefined,
+    dialect: SqlDialect,
     alias = "t",
 ): Q {
     if (!conditions?.length) return query;
@@ -53,13 +78,13 @@ function applySegmentConditions<Q extends { where: any }>(
                 q = q.where(ref, "<=", cond.value as any);
                 break;
             case "contains":
-                q = q.where(sql`LOWER(${ref}::text) LIKE LOWER(${`%${String(cond.value)}%`})`);
+                q = q.where(caseInsensitiveLike(ref, `%${String(cond.value)}%`, dialect));
                 break;
             case "startsWith":
-                q = q.where(sql`LOWER(${ref}::text) LIKE LOWER(${`${String(cond.value)}%`})`);
+                q = q.where(caseInsensitiveLike(ref, `${String(cond.value)}%`, dialect));
                 break;
             case "endsWith":
-                q = q.where(sql`LOWER(${ref}::text) LIKE LOWER(${`%${String(cond.value)}`})`);
+                q = q.where(caseInsensitiveLike(ref, `%${String(cond.value)}`, dialect));
                 break;
             case "in":
                 if (Array.isArray(cond.value) && cond.value.length) {
@@ -86,6 +111,22 @@ export default class ConnectorHelperSql {
     private dbHandler: Kysely<any> | undefined;
     private dbConfig: DBManagerTypes.DBConfig | undefined;
 
+    private get dialect(): SqlDialect {
+        return this.dbConfig?.type ?? "postgres";
+    }
+
+    /**
+     * OR-merged case-insensitive LIKE clause over the given columns, with
+     * LIKE wildcards in the search term escaped.
+     */
+    private buildSearchClause(search: string, searchColumns: string[]) {
+        const escaped = search.replace(/[\\%_]/g, "\\$&");
+        const likePattern = `%${escaped}%`;
+        return searchColumns
+            .map((col) => caseInsensitiveLike(sql.ref(`t.${col}`), likePattern, this.dialect))
+            .reduce((acc, piece) => (acc ? sql`${acc} OR ${piece}` : piece), undefined as any);
+    }
+
     public async connect({ config }: { config: DBManagerTypes.DBConfig }) {
         this.dbConfig = config;
         if (config.type == "postgres") {
@@ -106,6 +147,12 @@ export default class ConnectorHelperSql {
 
     public getSchemaDetails() {
         if (!this.dbHandler) throw new Error("Database handler is not initialized.");
+        if (this.dbConfig?.type === "mysql") {
+            return (new MysqlDbParser(this.dbHandler)).getSchemaDetails();
+        }
+        if (this.dbConfig?.type === "mssql") {
+            return (new MssqlDbParser(this.dbHandler, this.dbConfig.schema)).getSchemaDetails();
+        }
         return (new DbParser(this.dbHandler)).getSchemaDetails();
     }
 
@@ -130,18 +177,10 @@ export default class ConnectorHelperSql {
             }
         }
 
-        query = applySegmentConditions(query as any, extraConditions);
+        query = applySegmentConditions(query as any, extraConditions, this.dialect);
 
         if (search && searchColumns?.length) {
-            const escaped = search.replace(/[%_]/g, "\\$&");
-            const likePattern = `%${escaped}%`;
-            const clause = searchColumns
-                .map((col) =>
-                    sql`LOWER(${sql.ref(`t.${col}`)}::text) LIKE LOWER(${likePattern})`
-
-                )
-                .reduce((acc, piece) => (acc ? sql`${acc} OR ${piece}` : piece), undefined as any);
-
+            const clause = this.buildSearchClause(search, searchColumns);
             if (clause) {
                 query = query.where(clause);
             }
@@ -149,6 +188,10 @@ export default class ConnectorHelperSql {
 
         if (orderBy) {
             query = query.orderBy(sql.ref(`t.${orderBy}`), orderDirection ?? "asc");
+        } else if (this.dialect === "mssql" && (typeof limit === "number" || typeof offset === "number")) {
+            // MSSQL compiles limit/offset to OFFSET ... FETCH, which is a
+            // syntax error without an ORDER BY. Inject the standard no-op.
+            query = query.orderBy(sql`(SELECT NULL)`);
         }
 
         if (typeof limit === "number") query = query.limit(limit);
@@ -231,16 +274,14 @@ export default class ConnectorHelperSql {
         }
 
         return this.dbHandler.transaction().execute(async (trx) => {
-            const inserted = await trx
-                .insertInto(table)
-                .values(data)
-                .returningAll()
-                .execute();
+            const inserted = await this.insertReturning(trx, table, data);
 
             for (const j of junctions) {
                 const rows: Record<string, any>[] = [];
                 for (const parent of inserted) {
-                    const sourceValue = (parent as any)[j.parentSourceColumn];
+                    // Fall back to the MySQL auto-increment id when the PK
+                    // wasn't part of the input data (see insertReturning).
+                    const sourceValue = (parent as any)[j.parentSourceColumn] ?? (parent as any).insertId;
                     if (sourceValue == null) continue;
                     for (const tid of j.targetIds) {
                         rows.push({ [j.sourceColumn]: sourceValue, [j.targetColumn]: tid });
@@ -253,6 +294,34 @@ export default class ConnectorHelperSql {
 
             return inserted;
         });
+    }
+
+    /**
+     * Insert rows and return the inserted rows, per dialect:
+     * - postgres: RETURNING *
+     * - mssql: OUTPUT inserted.*
+     * - mysql: no RETURNING support — reconstruct rows from the input data,
+     *   attaching the auto-increment id as `insertId` when the DB generated
+     *   one (MySQL returns the first id of a multi-row batch; subsequent rows
+     *   are consecutive).
+     */
+    private async insertReturning(
+        trx: Kysely<any>,
+        table: string,
+        data: any,
+    ): Promise<Record<string, any>[]> {
+        if (this.dialect === "mssql") {
+            return trx.insertInto(table).values(data).outputAll("inserted").execute() as Promise<Record<string, any>[]>;
+        }
+        if (this.dialect === "mysql") {
+            const result = await trx.insertInto(table).values(data).executeTakeFirst();
+            const rows: Record<string, any>[] = Array.isArray(data) ? data : [data];
+            const insertId = result?.insertId;
+            return rows.map((row, i) =>
+                insertId != null ? { insertId: Number(insertId) + i, ...row } : { ...row },
+            );
+        }
+        return trx.insertInto(table).values(data).returningAll().execute() as Promise<Record<string, any>[]>;
     }
 
     /**
@@ -351,18 +420,10 @@ export default class ConnectorHelperSql {
             }
         }
 
-        q = applySegmentConditions(q as any, extraConditions);
+        q = applySegmentConditions(q as any, extraConditions, this.dialect);
 
         if (search && searchColumns?.length) {
-            const escaped = search.replace(/[%_]/g, "\\$&");
-            const likePattern = `%${escaped}%`;
-
-            const orClause = searchColumns
-                .map((col) =>
-                    sql`LOWER(${sql.ref(`t.${col}`)}::text) LIKE LOWER(${likePattern})`
-                )
-                .reduce((acc, piece) => (acc ? sql`${acc} OR ${piece}` : piece), undefined as any);
-
+            const orClause = this.buildSearchClause(search, searchColumns);
             if (orClause) {
                 q = q.where(orClause);
             }
@@ -375,9 +436,22 @@ export default class ConnectorHelperSql {
         if (!this.dbHandler) throw new Error("Database handler is not initialized.");
 
         if (schema) {
-            await this.dbHandler.executeQuery(
-                CompiledQuery.raw(`SET search_path TO "${schema}"`)
-            );
+            if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(schema)) {
+                throw new Error(`ConnectorHelperSql.query: invalid "schema" argument: ${String(schema)}`);
+            }
+            if (this.dialect === "postgres") {
+                await this.dbHandler.executeQuery(
+                    CompiledQuery.raw(`SET search_path TO "${schema}"`)
+                );
+            } else if (this.dialect === "mysql") {
+                // In MySQL a schema is a database
+                await this.dbHandler.executeQuery(
+                    CompiledQuery.raw(`USE \`${schema}\``)
+                );
+            } else {
+                // MSSQL has no session-level default-schema switch
+                throw new Error(`ConnectorHelperSql.query: schema switching is not supported on ${this.dialect}; qualify table names instead.`);
+            }
         }
 
         const compiled = CompiledQuery.raw(rawSql, params ?? []);

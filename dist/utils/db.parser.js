@@ -305,8 +305,8 @@ class DbParser {
                 kcu.column_name AS column,
                 ccu.table_name AS reference_table,
                 ccu.column_name AS reference_column,
-                rc.update_rule AS onUpdate,
-                rc.delete_rule AS onDelete,
+                rc.update_rule AS "onUpdate",
+                rc.delete_rule AS "onDelete",
                 CASE
                     WHEN EXISTS (
                         SELECT 1

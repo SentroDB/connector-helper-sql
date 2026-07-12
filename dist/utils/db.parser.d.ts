@@ -1,7 +1,7 @@
 import { Kysely } from "kysely";
 import DBManagerTypes from "@sentrodb/connector-node-types";
 export declare class DbParser {
-    private client;
+    protected client: Kysely<any>;
     constructor(dbHandler: Kysely<any>);
     getSchemaDetails(): Promise<{
         tables: DBManagerTypes.Table[];

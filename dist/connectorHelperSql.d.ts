@@ -14,6 +14,12 @@ export type JunctionWriteSpec = {
 export default class ConnectorHelperSql {
     private dbHandler;
     private dbConfig;
+    private get dialect();
+    /**
+     * OR-merged case-insensitive LIKE clause over the given columns, with
+     * LIKE wildcards in the search term escaped.
+     */
+    private buildSearchClause;
     connect({ config }: {
         config: DBManagerTypes.DBConfig;
     }): Promise<void>;
@@ -51,9 +57,17 @@ export default class ConnectorHelperSql {
         table: string;
         data: any;
         junctions?: JunctionWriteSpec[];
-    }): Promise<{
-        [x: string]: any;
-    }[] | import("kysely").InsertResult[] | undefined>;
+    }): Promise<import("kysely").InsertResult[] | Record<string, any>[] | undefined>;
+    /**
+     * Insert rows and return the inserted rows, per dialect:
+     * - postgres: RETURNING *
+     * - mssql: OUTPUT inserted.*
+     * - mysql: no RETURNING support — reconstruct rows from the input data,
+     *   attaching the auto-increment id as `insertId` when the DB generated
+     *   one (MySQL returns the first id of a multi-row batch; subsequent rows
+     *   are consecutive).
+     */
+    private insertReturning;
     /**
      * Read target ids from a junction table for a given source row. Used by
      * the connector to populate M2M multi-selects with current selections.
