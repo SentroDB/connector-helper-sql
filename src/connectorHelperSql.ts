@@ -229,9 +229,15 @@ export default class ConnectorHelperSql {
     ) {
         if (!this.dbHandler) return;
 
+        if (!where || !Object.keys(where).length) {
+            throw new Error(
+                `Refusing to update "${table}" without a where clause — this would affect every row.`,
+            );
+        }
+
         if (!junctions?.length) {
-            const query = this.dbHandler.updateTable(table).set(data);
-            if (where) query.where((eb) => eb.and(where));
+            let query = this.dbHandler.updateTable(table).set(data);
+            query = query.where((eb) => eb.and(where));
             return query.execute();
         }
 
@@ -370,6 +376,12 @@ export default class ConnectorHelperSql {
 
     public async delete({ table, where, single }: { table: string, where: any, single: boolean }) {
         if (!this.dbHandler) return;
+
+        if (!where || typeof where !== "object" || !Object.keys(where).length) {
+            throw new Error(
+                `Refusing to delete from "${table}" without a where clause — this would affect every row.`,
+            );
+        }
 
         let query = this.dbHandler.deleteFrom(table);
 

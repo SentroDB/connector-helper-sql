@@ -26,6 +26,7 @@ export default function MssqlConnector<T>(config: DBManagerTypes.DBConfig) {
                     options: {
                         database: config.database,
                         port: config.port,
+                        encrypt: !!config.ssl,
                         trustServerCertificate: true,
                     },
                     server: config.host,
