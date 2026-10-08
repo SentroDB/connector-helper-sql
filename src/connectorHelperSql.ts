@@ -275,8 +275,11 @@ export default class ConnectorHelperSql {
     }) {
         if (!this.dbHandler) return;
 
+        // Always hand the inserted rows back (RETURNING / OUTPUT, or the
+        // reconstructed rows with insertId on MySQL) so callers learn the
+        // generated keys without a second query.
         if (!junctions?.length) {
-            return this.dbHandler.insertInto(table).values(data).execute();
+            return this.insertReturning(this.dbHandler, table, data);
         }
 
         return this.dbHandler.transaction().execute(async (trx) => {

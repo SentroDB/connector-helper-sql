@@ -57,7 +57,7 @@ export default class ConnectorHelperSql {
         table: string;
         data: any;
         junctions?: JunctionWriteSpec[];
-    }): Promise<import("kysely").InsertResult[] | Record<string, any>[] | undefined>;
+    }): Promise<Record<string, any>[] | undefined>;
     /**
      * Insert rows and return the inserted rows, per dialect:
      * - postgres: RETURNING *
